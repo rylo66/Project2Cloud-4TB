@@ -27,6 +27,10 @@ ChartJS.register(
   Legend
 );
 
+const API_URL =
+  process.env.NEXT_PUBLIC_API_URL ||
+  "https://dietfunc21898.azurewebsites.net/api/analyze";
+
 type AvgMacro = {
   Diet_type: string;
   "Protein(g)": number;
