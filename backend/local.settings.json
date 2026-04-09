@@ -1,0 +1,17 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "<your storage connection string>",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AZURE_STORAGE_CONNECTION_STRING": "<your storage connection string>",
+
+    "BLOB_CONTAINER_NAME": "datasets",
+    "BLOB_FILE_NAME": "All_Diets.csv",
+
+    "PROCESSED_CONTAINER_NAME": "processed",
+    "CLEANED_BLOB_FILE_NAME": "cleaned_diets.csv",
+    "CHART_BLOB_FILE_NAME": "chart_data.json",
+
+    "ALLOW_LIVE_REBUILD": "true"
+  }
+}
