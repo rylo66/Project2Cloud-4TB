@@ -1,5 +1,14 @@
+azure-functions
+azure-storage-blob
+<<<<<<< Updated upstream
+=======
+azure-cosmos
+bcrypt
+PyJWT
+google-auth
+requests
 pandas
 matplotlib
 seaborn
-azure-functions
-azure-storage-blob
+bcrypt
+>>>>>>> Stashed changes
