@@ -14,9 +14,6 @@ from auth_helpers import (
     verify_google_token,
     verify_password,
 )
-
-import azure.functions as func
-
 from lambda_function import (
     DATASET_CONTAINER_NAME,
     RAW_DATASET_BLOB_NAME,
