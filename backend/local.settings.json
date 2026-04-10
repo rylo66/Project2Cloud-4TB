@@ -1,20 +1,15 @@
 {
   "IsEncrypted": false,
   "Values": {
-    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "AzureWebJobsStorage": "DefaultEndpointsProtocol=https;AccountName=YOUR_STORAGE_ACCOUNT;AccountKey=YOUR_KEY;EndpointSuffix=core.windows.net",
     "FUNCTIONS_WORKER_RUNTIME": "python",
-
-    "JWT_SECRET": "replace-with-long-random-secret",
-
-    "GOOGLE_CLIENT_ID": "your_google_client_id_here",
-
-    "AZURE_STORAGE_CONNECTION_STRING": "your_storage_connection_string",
-
-    "COSMOS_DB_ENDPOINT": "https://your-account.documents.azure.com:443/",
-    "COSMOS_DB_KEY": "your_cosmos_primary_key",
+    "JWT_SECRET": "887889361b269fcb673bc71fe55bd0ca762eaeaee1e95ed621e45c3ca219e693",
+    "GOOGLE_CLIENT_ID": "YOUR_GOOGLE_CLIENT_ID",
+    "AZURE_STORAGE_CONNECTION_STRING": "DefaultEndpointsProtocol=https;AccountName=YOUR_STORAGE_ACCOUNT;AccountKey=YOUR_KEY;EndpointSuffix=core.windows.net",
+    "COSMOS_DB_ENDPOINT": "https://YOUR-COSMOS-ACCOUNT.documents.azure.com:443/",
+    "COSMOS_DB_KEY": "YOUR_COSMOS_KEY",
     "COSMOS_DB_DATABASE": "dietdashboard",
     "COSMOS_DB_CONTAINER": "users",
-
     "ALLOW_LIVE_REBUILD": "false"
   }
 }
