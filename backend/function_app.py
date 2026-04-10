@@ -15,6 +15,17 @@ from auth_helpers import (
 
 import azure.functions as func
 
+def require_auth(req: func.HttpRequest):
+    token = get_bearer_token(req)
+    if not token:
+        return None, json_response({"error": "Missing token."}, 401)
+
+    try:
+        payload = decode_jwt(token)
+        return payload, None
+    except Exception:
+        return None, json_response({"error": "Invalid or expired token."}, 401)
+
 from lambda_function import (
     DATASET_CONTAINER_NAME,
     RAW_DATASET_BLOB_NAME,
