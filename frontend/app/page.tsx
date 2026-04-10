@@ -209,14 +209,6 @@ export default function Page() {
     clearSession("Your session expired. Please sign in again.");
   }, [clearSession]);
 
-  const authHeaders = useMemo(() => {
-    return token
-      ? {
-          Authorization: `Bearer ${token}`,
-        }
-      : {};
-  }, [token]);
-
   const dietOptions = useMemo(() => {
     return dashboard?.dietCounts?.map((item) => item.diet).filter(Boolean) ?? [];
   }, [dashboard]);
@@ -436,7 +428,6 @@ export default function Page() {
 
       const response = await fetch(`${API_BASE}/analyze`, {
         cache: "no-store",
-        headers: authHeaders,
       });
 
       if (response.status === 401) {
@@ -458,7 +449,7 @@ export default function Page() {
     } finally {
       setLoadingDashboard(false);
     }
-  }, [authHeaders, handleUnauthorized, token]);
+  }, [handleUnauthorized, token]);
 
   const fetchRecipes = useCallback(
     async (selectedDiet = diet, selectedKeyword = keyword, selectedPage = page) => {
@@ -476,7 +467,6 @@ export default function Page() {
 
         const response = await fetch(`${API_BASE}/recipes?${params.toString()}`, {
           cache: "no-store",
-          headers: authHeaders,
         });
 
         if (response.status === 401) {
@@ -497,7 +487,7 @@ export default function Page() {
         setLoadingRecipes(false);
       }
     },
-    [authHeaders, diet, handleUnauthorized, keyword, page, token]
+    [diet, handleUnauthorized, keyword, page, token]
   );
 
   useEffect(() => {
