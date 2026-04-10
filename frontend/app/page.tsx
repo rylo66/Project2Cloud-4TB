@@ -27,7 +27,9 @@ ChartJS.register(
   Legend
 );
 
-const API_BASE = "/api";
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE ||
+  "https://dietfunc21898.azurewebsites.net/api";
 
 type AvgMacro = {
   diet: string;
@@ -85,6 +87,17 @@ type RecipesResponse = {
   servedAt?: string;
 };
 
+type AuthUser = {
+  name: string;
+  email: string;
+  provider: string;
+};
+
+type AuthResponse = {
+  token: string;
+  user: AuthUser;
+};
+
 function formatNumber(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "N/A";
   return Number(value).toFixed(1);
@@ -99,8 +112,8 @@ export default function Page() {
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
   const [recipes, setRecipes] = useState<RecipesResponse | null>(null);
 
-  const [loadingDashboard, setLoadingDashboard] = useState(true);
-  const [loadingRecipes, setLoadingRecipes] = useState(true);
+  const [loadingDashboard, setLoadingDashboard] = useState(false);
+  const [loadingRecipes, setLoadingRecipes] = useState(false);
 
   const [dashboardError, setDashboardError] = useState("");
   const [recipesError, setRecipesError] = useState("");
@@ -111,7 +124,25 @@ export default function Page() {
   const [diet, setDiet] = useState("");
   const [page, setPage] = useState(1);
 
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [token, setToken] = useState("");
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [nameInput, setNameInput] = useState("");
+  const [emailInput, setEmailInput] = useState("");
+  const [passwordInput, setPasswordInput] = useState("");
+
   const pageSize = 10;
+
+  const authHeaders = useMemo(() => {
+    return token
+      ? {
+          Authorization: `Bearer ${token}`,
+        }
+      : {};
+  }, [token]);
 
   const dietOptions = useMemo(() => {
     return dashboard?.dietCounts?.map((item) => item.diet).filter(Boolean) ?? [];
@@ -176,12 +207,36 @@ export default function Page() {
     return summary;
   }, [dashboard]);
 
+  useEffect(() => {
+    const savedToken = localStorage.getItem("diet_token");
+    const savedUser = localStorage.getItem("diet_user");
+
+    if (savedToken && savedUser) {
+      try {
+        setToken(savedToken);
+        setUser(JSON.parse(savedUser));
+      } catch (error) {
+        console.error("Failed to restore saved session", error);
+        localStorage.removeItem("diet_token");
+        localStorage.removeItem("diet_user");
+      }
+    }
+
+    setAuthLoading(false);
+  }, []);
+
   const fetchDashboard = async () => {
+    if (!token) return;
+
     try {
       setLoadingDashboard(true);
       setDashboardError("");
 
-      const response = await fetch(`${API_BASE}/analyze`, { cache: "no-store" });
+      const response = await fetch(`${API_BASE}/analyze`, {
+        cache: "no-store",
+        headers: authHeaders,
+      });
+
       if (!response.ok) {
         const text = await response.text();
         throw new Error(text || "Failed to load dashboard analytics.");
@@ -202,6 +257,8 @@ export default function Page() {
     selectedKeyword = keyword,
     selectedPage = page
   ) => {
+    if (!token) return;
+
     try {
       setLoadingRecipes(true);
       setRecipesError("");
@@ -214,6 +271,7 @@ export default function Page() {
 
       const response = await fetch(`${API_BASE}/recipes?${params.toString()}`, {
         cache: "no-store",
+        headers: authHeaders,
       });
 
       if (!response.ok) {
@@ -232,12 +290,99 @@ export default function Page() {
   };
 
   useEffect(() => {
+    if (!token) return;
     fetchDashboard();
-  }, []);
+  }, [token]);
 
   useEffect(() => {
+    if (!token) return;
     fetchRecipes(diet, keyword, page);
-  }, [diet, keyword, page]);
+  }, [token, diet, keyword, page]);
+
+  const handleAuthSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setAuthError("");
+    setInfoMessage("");
+
+    if (authMode === "register" && !nameInput.trim()) {
+      setAuthError("Name is required.");
+      return;
+    }
+
+    if (!emailInput.trim() || !passwordInput.trim()) {
+      setAuthError("Email and password are required.");
+      return;
+    }
+
+    try {
+      setAuthSubmitting(true);
+
+      const route = authMode === "login" ? "auth/login" : "auth/register";
+
+      const payload =
+        authMode === "login"
+          ? {
+              email: emailInput.trim(),
+              password: passwordInput,
+            }
+          : {
+              name: nameInput.trim(),
+              email: emailInput.trim(),
+              password: passwordInput,
+            };
+
+      const response = await fetch(`${API_BASE}/${route}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const json = await response.json();
+
+      if (!response.ok) {
+        throw new Error(json.error || "Authentication failed.");
+      }
+
+      const data = json as AuthResponse;
+
+      setUser(data.user);
+      setToken(data.token);
+
+      localStorage.setItem("diet_token", data.token);
+      localStorage.setItem("diet_user", JSON.stringify(data.user));
+
+      setNameInput("");
+      setEmailInput("");
+      setPasswordInput("");
+      setAuthError("");
+      setInfoMessage(`Welcome, ${data.user.name}.`);
+      setPage(1);
+    } catch (error) {
+      console.error(error);
+      setAuthError(error instanceof Error ? error.message : "Authentication failed.");
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    setToken("");
+    setDashboard(null);
+    setRecipes(null);
+    setDashboardError("");
+    setRecipesError("");
+    setInfoMessage("");
+    setKeywordInput("");
+    setKeyword("");
+    setDiet("");
+    setPage(1);
+
+    localStorage.removeItem("diet_token");
+    localStorage.removeItem("diet_user");
+  };
 
   const handleSearchSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -310,6 +455,158 @@ export default function Page() {
   const totalPages = recipes?.pagination?.totalPages || 1;
   const currentPage = recipes?.pagination?.page || 1;
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-6">
+        <div className="bg-white rounded-lg shadow-lg p-8 w-full max-w-md text-center">
+          <h1 className="text-2xl font-semibold mb-2">Nutritional Insights</h1>
+          <p className="text-gray-600">Checking your session...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-6">
+        <div className="bg-white rounded-lg shadow-lg p-8 w-full max-w-md">
+          <h1 className="text-3xl font-semibold text-center mb-2">Nutritional Insights</h1>
+          <p className="text-sm text-gray-600 text-center mb-6">
+            Please {authMode === "login" ? "log in" : "register"} to access the dashboard.
+          </p>
+
+          <div className="flex gap-2 mb-6">
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode("login");
+                setAuthError("");
+              }}
+              className={`flex-1 rounded px-4 py-2 ${
+                authMode === "login"
+                  ? "bg-blue-600 text-white"
+                  : "bg-gray-200 text-gray-800"
+              }`}
+            >
+              Login
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode("register");
+                setAuthError("");
+              }}
+              className={`flex-1 rounded px-4 py-2 ${
+                authMode === "register"
+                  ? "bg-blue-600 text-white"
+                  : "bg-gray-200 text-gray-800"
+              }`}
+            >
+              Register
+            </button>
+          </div>
+
+          <form onSubmit={handleAuthSubmit} className="space-y-4">
+            {authMode === "register" && (
+              <div>
+                <label className="block text-sm font-medium mb-1">Name</label>
+                <input
+                  type="text"
+                  value={nameInput}
+                  onChange={(e) => setNameInput(e.target.value)}
+                  className="w-full rounded border p-2"
+                  placeholder="Enter your name"
+                />
+              </div>
+            )}
+
+            <div>
+              <label className="block text-sm font-medium mb-1">Email</label>
+              <input
+                type="email"
+                value={emailInput}
+                onChange={(e) => setEmailInput(e.target.value)}
+                className="w-full rounded border p-2"
+                placeholder="Enter your email"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">Password</label>
+              <input
+                type="password"
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                className="w-full rounded border p-2"
+                placeholder="Enter your password"
+              />
+            </div>
+
+            {authError && (
+              <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                {authError}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={authSubmitting}
+              className="w-full rounded bg-blue-600 text-white py-2 px-4 disabled:opacity-50"
+            >
+              {authSubmitting
+                ? authMode === "login"
+                  ? "Logging in..."
+                  : "Creating account..."
+                : authMode === "login"
+                ? "Login"
+                : "Create Account"}
+            </button>
+          </form>
+
+          <div className="mt-6 rounded-lg border border-gray-200 bg-gray-50 p-4">
+            <h2 className="font-semibold mb-2">OAuth Login</h2>
+            <p className="text-sm text-gray-600 mb-3">
+              Once your backend OAuth endpoint is ready, connect Google or GitHub here.
+            </p>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="bg-blue-600 text-white py-2 px-4 rounded"
+                onClick={() =>
+                  setInfoMessage(
+                    "Google OAuth button is ready for wiring once your backend route is implemented."
+                  )
+                }
+              >
+                Login with Google
+              </button>
+
+              <button
+                type="button"
+                className="bg-gray-800 text-white py-2 px-4 rounded"
+                onClick={() =>
+                  setInfoMessage(
+                    "GitHub OAuth button is ready for wiring once your backend route is implemented."
+                  )
+                }
+              >
+                Login with GitHub
+              </button>
+            </div>
+          </div>
+
+          {infoMessage && (
+            <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
+              {infoMessage}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gray-100">
       <header className="bg-blue-600 p-4 text-white">
@@ -321,13 +618,25 @@ export default function Page() {
             </p>
           </div>
 
-          <div className="flex flex-wrap gap-2 text-sm">
-            <span className="rounded bg-blue-500 px-3 py-1">
-              Source: {dashboard?.source || "loading"}
-            </span>
-            <span className="rounded bg-blue-500 px-3 py-1">
-              Total Recipes: {dashboard?.totalRecipes ?? 0}
-            </span>
+          <div className="flex flex-col gap-2 md:items-end">
+            <div className="flex flex-wrap gap-2 text-sm">
+              <span className="rounded bg-blue-500 px-3 py-1">
+                Signed in as: {user.name}
+              </span>
+              <span className="rounded bg-blue-500 px-3 py-1">
+                Source: {dashboard?.source || "loading"}
+              </span>
+              <span className="rounded bg-blue-500 px-3 py-1">
+                Total Recipes: {dashboard?.totalRecipes ?? 0}
+              </span>
+            </div>
+
+            <button
+              onClick={handleLogout}
+              className="rounded bg-white px-4 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
+            >
+              Logout
+            </button>
           </div>
         </div>
       </header>
@@ -638,7 +947,7 @@ export default function Page() {
                 className="bg-blue-600 text-white py-2 px-4 rounded"
                 onClick={() =>
                   setInfoMessage(
-                    "Wire this button to your future Google OAuth route, like /api/auth/oauth/start?provider=google."
+                    "Wire this button to your Google OAuth backend endpoint when it is ready."
                   )
                 }
               >
@@ -649,7 +958,7 @@ export default function Page() {
                 className="bg-gray-800 text-white py-2 px-4 rounded"
                 onClick={() =>
                   setInfoMessage(
-                    "Wire this button to your future GitHub OAuth route, like /api/auth/oauth/start?provider=github."
+                    "Wire this button to your GitHub OAuth backend endpoint when it is ready."
                   )
                 }
               >

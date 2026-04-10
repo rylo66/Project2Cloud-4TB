@@ -3,3 +3,8 @@ matplotlib
 seaborn
 azure-functions
 azure-storage-blob
+azure-cosmos
+bcrypt
+PyJWT
+google-auth
+requests

@@ -51,7 +51,6 @@ export async function writeUsers(users: StoredUser[]): Promise<void> {
 
   const body = JSON.stringify(users, null, 2);
   await blobClient.upload(body, Buffer.byteLength(body), {
-    overwrite: true,
     blobHTTPHeaders: { blobContentType: "application/json" },
   });
 }
