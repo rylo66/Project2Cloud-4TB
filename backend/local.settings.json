@@ -1,9 +1,9 @@
 {
   "IsEncrypted": false,
   "Values": {
-    "AzureWebJobsStorage": "<your storage connection string>",
+    "AzureWebJobsStorage": "PASTE_THE_REAL_CONNECTION_STRING_HERE",
     "FUNCTIONS_WORKER_RUNTIME": "python",
-    "AZURE_STORAGE_CONNECTION_STRING": "<your storage connection string>",
+    "AZURE_STORAGE_CONNECTION_STRING": "PASTE_THE_REAL_CONNECTION_STRING_HERE",
 
     "BLOB_CONTAINER_NAME": "datasets",
     "BLOB_FILE_NAME": "All_Diets.csv",
