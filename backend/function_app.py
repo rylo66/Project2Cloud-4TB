@@ -4,17 +4,16 @@ import os
 import time
 from datetime import datetime, timezone
 
+import azure.functions as func
+
 from auth_helpers import (
     create_jwt,
     create_user,
     decode_jwt,
     get_user_by_email,
-    verify_password,
     verify_google_token,
+    verify_password,
 )
-
-import azure.functions as func
-
 from lambda_function import (
     DATASET_CONTAINER_NAME,
     RAW_DATASET_BLOB_NAME,
@@ -25,11 +24,13 @@ from lambda_function import (
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
+
 def get_json_body(req: func.HttpRequest) -> dict:
     try:
         return req.get_json()
     except ValueError:
         return {}
+
 
 def get_bearer_token(req: func.HttpRequest) -> str | None:
     auth_header = req.headers.get("Authorization", "")
@@ -53,20 +54,51 @@ def parse_int_query(req: func.HttpRequest, key: str, default: int) -> int:
     return int(raw)
 
 
+def require_auth(req: func.HttpRequest) -> dict:
+    token = get_bearer_token(req)
+    if not token:
+        raise PermissionError("Missing bearer token.")
+
+    try:
+        payload = decode_jwt(token)
+    except Exception as exc:
+        raise PermissionError("Invalid or expired token.") from exc
+
+    email = payload.get("email")
+    if not email:
+        raise PermissionError("Invalid token payload.")
+
+    user = get_user_by_email(email)
+    if not user:
+        raise PermissionError("User account no longer exists.")
+
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "name": user["name"],
+        "provider": user.get("provider", "local"),
+    }
+
+
 @app.function_name(name="analyze")
-@app.route(route="analyze", methods=["GET"])
+@app.route(route="analyze", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def analyze(req: func.HttpRequest) -> func.HttpResponse:
     start = time.time()
 
     try:
+        user = require_auth(req)
+
         payload = get_cached_chart_data()
         payload["source"] = "cache"
         payload["executionTime"] = f"{round(time.time() - start, 2)}s"
         payload["servedAt"] = datetime.now(timezone.utc).isoformat()
+        payload["requestedBy"] = user["email"]
         return json_response(payload, 200)
 
+    except PermissionError as exc:
+        return json_response({"error": str(exc)}, 401)
+
     except FileNotFoundError:
-        # Handy during local testing if the trigger hasn't run yet.
         if os.getenv("ALLOW_LIVE_REBUILD", "false").lower() == "true":
             process_and_cache_dataset()
             payload = get_cached_chart_data()
@@ -91,9 +123,11 @@ def analyze(req: func.HttpRequest) -> func.HttpResponse:
 
 
 @app.function_name(name="recipes")
-@app.route(route="recipes", methods=["GET"])
+@app.route(route="recipes", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def recipes(req: func.HttpRequest) -> func.HttpResponse:
     try:
+        require_auth(req)
+
         diet = req.params.get("diet")
         q = req.params.get("q")
         page = parse_int_query(req, "page", 1)
@@ -108,6 +142,9 @@ def recipes(req: func.HttpRequest) -> func.HttpResponse:
         payload["source"] = "cleaned-data-cache"
         payload["servedAt"] = datetime.now(timezone.utc).isoformat()
         return json_response(payload, 200)
+
+    except PermissionError as exc:
+        return json_response({"error": str(exc)}, 401)
 
     except ValueError as exc:
         return json_response({"error": str(exc)}, 400)
@@ -155,7 +192,6 @@ def process_dataset_on_blob_change(myblob: func.InputStream) -> None:
     try:
         blob_name = os.path.basename(myblob.name)
 
-        # Only process the main CSV, not every file dropped in the container.
         if blob_name.lower() != os.path.basename(RAW_DATASET_BLOB_NAME).lower():
             logging.info(
                 "Skipping blob '%s'. Waiting for '%s'.",
@@ -177,7 +213,8 @@ def process_dataset_on_blob_change(myblob: func.InputStream) -> None:
         logging.exception("Blob trigger processing failed.")
         raise
 
-    @app.function_name(name="register")
+
+@app.function_name(name="register")
 @app.route(route="auth/register", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
 def register(req: func.HttpRequest) -> func.HttpResponse:
     try:
@@ -195,14 +232,17 @@ def register(req: func.HttpRequest) -> func.HttpResponse:
         user = create_user(name=name, email=email, password=password)
         token = create_jwt(user)
 
-        return json_response({
-            "token": token,
-            "user": {
-                "name": user["name"],
-                "email": user["email"],
-                "provider": user["provider"],
-            }
-        }, 201)
+        return json_response(
+            {
+                "token": token,
+                "user": {
+                    "name": user["name"],
+                    "email": user["email"],
+                    "provider": user["provider"],
+                },
+            },
+            201,
+        )
     except ValueError as exc:
         return json_response({"error": str(exc)}, 400)
     except Exception as exc:
@@ -222,18 +262,20 @@ def login(req: func.HttpRequest) -> func.HttpResponse:
         if not user or user.get("provider") != "local":
             return json_response({"error": "Invalid email or password."}, 401)
 
-        if not verify_password(password, user["passwordHash"]):
+        if not user.get("passwordHash") or not verify_password(password, user["passwordHash"]):
             return json_response({"error": "Invalid email or password."}, 401)
 
         token = create_jwt(user)
-        return json_response({
-            "token": token,
-            "user": {
-                "name": user["name"],
-                "email": user["email"],
-                "provider": user["provider"],
+        return json_response(
+            {
+                "token": token,
+                "user": {
+                    "name": user["name"],
+                    "email": user["email"],
+                    "provider": user["provider"],
+                },
             }
-        })
+        )
     except Exception as exc:
         logging.exception("Login failed.")
         return json_response({"error": str(exc)}, 500)
@@ -243,20 +285,10 @@ def login(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="auth/me", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def me(req: func.HttpRequest) -> func.HttpResponse:
     try:
-        token = get_bearer_token(req)
-        if not token:
-            return json_response({"error": "Missing token."}, 401)
-
-        payload = decode_jwt(token)
-        return json_response({
-            "user": {
-                "name": payload["name"],
-                "email": payload["email"],
-                "provider": payload["provider"],
-            }
-        })
-    except Exception:
-        return json_response({"error": "Invalid or expired token."}, 401)
+        user = require_auth(req)
+        return json_response({"user": user})
+    except PermissionError as exc:
+        return json_response({"error": str(exc)}, 401)
 
 
 @app.function_name(name="google_login")
@@ -269,12 +301,33 @@ def google_login(req: func.HttpRequest) -> func.HttpResponse:
             return json_response({"error": "Missing Google credential."}, 400)
 
         info = verify_google_token(credential)
+        if not info.get("email"):
+            return json_response({"error": "Google account email was not returned."}, 400)
+        if not info.get("email_verified", False):
+            return json_response({"error": "Google email must be verified."}, 401)
+
         email = info["email"]
-        name = info.get("name") or email.split("@")[0]
+        name = (info.get("name") or email.split("@")[0]).strip()
         sub = info["sub"]
 
         user = get_user_by_email(email)
-        if not user:
+        if user:
+            if user.get("provider") != "google":
+                return json_response(
+                    {
+                        "error": (
+                            "An account with this email already exists. "
+                            "Please sign in with email and password."
+                        )
+                    },
+                    409,
+                )
+            if user.get("googleSub") and user["googleSub"] != sub:
+                return json_response(
+                    {"error": "Google account does not match the saved user record."},
+                    401,
+                )
+        else:
             user = create_user(
                 name=name,
                 email=email,
@@ -284,14 +337,16 @@ def google_login(req: func.HttpRequest) -> func.HttpResponse:
             )
 
         token = create_jwt(user)
-        return json_response({
-            "token": token,
-            "user": {
-                "name": user["name"],
-                "email": user["email"],
-                "provider": user["provider"],
+        return json_response(
+            {
+                "token": token,
+                "user": {
+                    "name": user["name"],
+                    "email": user["email"],
+                    "provider": user["provider"],
+                },
             }
-        })
+        )
     except Exception as exc:
         logging.exception("Google login failed.")
         return json_response({"error": str(exc)}, 500)

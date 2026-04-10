@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { Bar, Pie, Scatter } from "react-chartjs-2";
 import {
   ArcElement,
@@ -30,6 +30,8 @@ ChartJS.register(
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ||
   "https://dietfunc21898.azurewebsites.net/api";
+const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
+const GOOGLE_SCRIPT_ID = "google-identity-service";
 
 type AvgMacro = {
   diet: string;
@@ -59,6 +61,7 @@ type DashboardResponse = {
   generatedAt?: string;
   source?: string;
   servedAt?: string;
+  requestedBy?: string;
 };
 
 type RecipeItem = {
@@ -98,6 +101,31 @@ type AuthResponse = {
   user: AuthUser;
 };
 
+type GoogleCredentialResponse = {
+  credential?: string;
+};
+
+declare global {
+  interface Window {
+    google?: {
+      accounts?: {
+        id?: {
+          initialize: (options: {
+            client_id: string;
+            callback: (response: GoogleCredentialResponse) => void;
+          }) => void;
+          renderButton: (
+            parent: HTMLElement,
+            options: Record<string, string | number>
+          ) => void;
+          prompt: () => void;
+          cancel?: () => void;
+        };
+      };
+    };
+  }
+}
+
 function formatNumber(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "N/A";
   return Number(value).toFixed(1);
@@ -106,6 +134,18 @@ function formatNumber(value: number | null | undefined) {
 function normalizeValue(value: number, max: number) {
   if (!max || max <= 0) return 0.15;
   return Math.max(0.15, value / max);
+}
+
+async function readErrorMessage(response: Response) {
+  const text = await response.text();
+  if (!text) return `Request failed with status ${response.status}.`;
+
+  try {
+    const parsed = JSON.parse(text) as { error?: string };
+    return parsed.error || text;
+  } catch {
+    return text;
+  }
 }
 
 export default function Page() {
@@ -133,8 +173,41 @@ export default function Page() {
   const [nameInput, setNameInput] = useState("");
   const [emailInput, setEmailInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
+  const [googleButtonReady, setGoogleButtonReady] = useState(false);
+  const [googleError, setGoogleError] = useState("");
 
   const pageSize = 10;
+
+  const clearSession = useCallback((message?: string) => {
+    setUser(null);
+    setToken("");
+    setDashboard(null);
+    setRecipes(null);
+    setDashboardError("");
+    setRecipesError("");
+    setKeywordInput("");
+    setKeyword("");
+    setDiet("");
+    setPage(1);
+    localStorage.removeItem("diet_token");
+    localStorage.removeItem("diet_user");
+
+    if (message) {
+      setAuthError(message);
+      setInfoMessage("");
+    }
+  }, []);
+
+  const persistSession = useCallback((nextUser: AuthUser, nextToken: string) => {
+    setUser(nextUser);
+    setToken(nextToken);
+    localStorage.setItem("diet_token", nextToken);
+    localStorage.setItem("diet_user", JSON.stringify(nextUser));
+  }, []);
+
+  const handleUnauthorized = useCallback(() => {
+    clearSession("Your session expired. Please sign in again.");
+  }, [clearSession]);
 
   const authHeaders = useMemo(() => {
     return token
@@ -207,25 +280,154 @@ export default function Page() {
     return summary;
   }, [dashboard]);
 
-  useEffect(() => {
-    const savedToken = localStorage.getItem("diet_token");
-    const savedUser = localStorage.getItem("diet_user");
+  const handleGoogleCredential = useCallback(
+    async (googleResponse: GoogleCredentialResponse) => {
+      if (!googleResponse.credential) {
+        setGoogleError("Google did not return a login credential.");
+        return;
+      }
 
-    if (savedToken && savedUser) {
       try {
+        setAuthSubmitting(true);
+        setAuthError("");
+        setGoogleError("");
+        setInfoMessage("");
+
+        const response = await fetch(`${API_BASE}/auth/google`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ credential: googleResponse.credential }),
+        });
+
+        const message = await readErrorMessage(response);
+        if (!response.ok) {
+          throw new Error(message || "Google sign-in failed.");
+        }
+
+        const data = JSON.parse(message) as AuthResponse;
+        persistSession(data.user, data.token);
+        setAuthMode("login");
+        setInfoMessage(`Welcome, ${data.user.name}.`);
+        setPage(1);
+      } catch (error) {
+        console.error(error);
+        setGoogleError(error instanceof Error ? error.message : "Google sign-in failed.");
+      } finally {
+        setAuthSubmitting(false);
+      }
+    },
+    [persistSession]
+  );
+
+  useEffect(() => {
+    let active = true;
+
+    const restoreSession = async () => {
+      const savedToken = localStorage.getItem("diet_token");
+      const savedUser = localStorage.getItem("diet_user");
+
+      if (!savedToken || !savedUser) {
+        if (active) setAuthLoading(false);
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/auth/me`, {
+          cache: "no-store",
+          headers: {
+            Authorization: `Bearer ${savedToken}`,
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(await readErrorMessage(response));
+        }
+
+        const json = (await response.json()) as { user: AuthUser };
+        if (!active) return;
+
         setToken(savedToken);
-        setUser(JSON.parse(savedUser));
+        setUser(json.user);
+        localStorage.setItem("diet_user", JSON.stringify(json.user));
       } catch (error) {
         console.error("Failed to restore saved session", error);
+        if (!active) return;
         localStorage.removeItem("diet_token");
         localStorage.removeItem("diet_user");
+        setAuthError("Your saved session is no longer valid. Please sign in again.");
+      } finally {
+        if (active) setAuthLoading(false);
       }
-    }
+    };
 
-    setAuthLoading(false);
+    restoreSession();
+
+    return () => {
+      active = false;
+    };
   }, []);
 
-  const fetchDashboard = async () => {
+  useEffect(() => {
+    if (user || !GOOGLE_CLIENT_ID) {
+      setGoogleButtonReady(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const renderGoogleButton = () => {
+      if (cancelled) return;
+
+      const googleId = window.google?.accounts?.id;
+      const target = document.getElementById("google-signin-button");
+      if (!googleId || !target) return;
+
+      target.innerHTML = "";
+      googleId.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleGoogleCredential,
+      });
+      googleId.renderButton(target, {
+        theme: "outline",
+        size: "large",
+        text: "signin_with",
+        shape: "rectangular",
+        width: 320,
+      });
+      setGoogleButtonReady(true);
+      setGoogleError("");
+    };
+
+    const existingScript = document.getElementById(GOOGLE_SCRIPT_ID) as HTMLScriptElement | null;
+    if (existingScript) {
+      renderGoogleButton();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const script = document.createElement("script");
+    script.id = GOOGLE_SCRIPT_ID;
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    script.onload = renderGoogleButton;
+    script.onerror = () => {
+      if (cancelled) return;
+      setGoogleError("Could not load Google sign-in. Check your client ID and allowed origins.");
+      setGoogleButtonReady(false);
+    };
+
+    document.body.appendChild(script);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [handleGoogleCredential, user]);
+
+  const fetchDashboard = useCallback(async () => {
     if (!token) return;
 
     try {
@@ -237,72 +439,82 @@ export default function Page() {
         headers: authHeaders,
       });
 
+      if (response.status === 401) {
+        handleUnauthorized();
+        return;
+      }
+
       if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || "Failed to load dashboard analytics.");
+        throw new Error(await readErrorMessage(response));
       }
 
       const json: DashboardResponse = await response.json();
       setDashboard(json);
     } catch (error) {
       console.error(error);
-      setDashboardError("Could not load nutritional insights.");
+      setDashboardError(
+        error instanceof Error ? error.message : "Could not load nutritional insights."
+      );
     } finally {
       setLoadingDashboard(false);
     }
-  };
+  }, [authHeaders, handleUnauthorized, token]);
 
-  const fetchRecipes = async (
-    selectedDiet = diet,
-    selectedKeyword = keyword,
-    selectedPage = page
-  ) => {
-    if (!token) return;
+  const fetchRecipes = useCallback(
+    async (selectedDiet = diet, selectedKeyword = keyword, selectedPage = page) => {
+      if (!token) return;
 
-    try {
-      setLoadingRecipes(true);
-      setRecipesError("");
+      try {
+        setLoadingRecipes(true);
+        setRecipesError("");
 
-      const params = new URLSearchParams();
-      if (selectedDiet) params.set("diet", selectedDiet);
-      if (selectedKeyword) params.set("q", selectedKeyword);
-      params.set("page", String(selectedPage));
-      params.set("pageSize", String(pageSize));
+        const params = new URLSearchParams();
+        if (selectedDiet) params.set("diet", selectedDiet);
+        if (selectedKeyword) params.set("q", selectedKeyword);
+        params.set("page", String(selectedPage));
+        params.set("pageSize", String(pageSize));
 
-      const response = await fetch(`${API_BASE}/recipes?${params.toString()}`, {
-        cache: "no-store",
-        headers: authHeaders,
-      });
+        const response = await fetch(`${API_BASE}/recipes?${params.toString()}`, {
+          cache: "no-store",
+          headers: authHeaders,
+        });
 
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || "Failed to load recipes.");
+        if (response.status === 401) {
+          handleUnauthorized();
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(await readErrorMessage(response));
+        }
+
+        const json: RecipesResponse = await response.json();
+        setRecipes(json);
+      } catch (error) {
+        console.error(error);
+        setRecipesError(error instanceof Error ? error.message : "Could not load recipes.");
+      } finally {
+        setLoadingRecipes(false);
       }
-
-      const json: RecipesResponse = await response.json();
-      setRecipes(json);
-    } catch (error) {
-      console.error(error);
-      setRecipesError("Could not load recipes.");
-    } finally {
-      setLoadingRecipes(false);
-    }
-  };
+    },
+    [authHeaders, diet, handleUnauthorized, keyword, page, token]
+  );
 
   useEffect(() => {
     if (!token) return;
     fetchDashboard();
-  }, [token]);
+  }, [fetchDashboard, token]);
 
   useEffect(() => {
     if (!token) return;
     fetchRecipes(diet, keyword, page);
-  }, [token, diet, keyword, page]);
+  }, [diet, fetchRecipes, keyword, page, token]);
 
   const handleAuthSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setAuthError("");
     setInfoMessage("");
+    setGoogleError("");
 
     if (authMode === "register" && !nameInput.trim()) {
       setAuthError("Name is required.");
@@ -318,7 +530,6 @@ export default function Page() {
       setAuthSubmitting(true);
 
       const route = authMode === "login" ? "auth/login" : "auth/register";
-
       const payload =
         authMode === "login"
           ? {
@@ -339,20 +550,12 @@ export default function Page() {
         body: JSON.stringify(payload),
       });
 
-      const json = await response.json();
-
       if (!response.ok) {
-        throw new Error(json.error || "Authentication failed.");
+        throw new Error(await readErrorMessage(response));
       }
 
-      const data = json as AuthResponse;
-
-      setUser(data.user);
-      setToken(data.token);
-
-      localStorage.setItem("diet_token", data.token);
-      localStorage.setItem("diet_user", JSON.stringify(data.user));
-
+      const data = (await response.json()) as AuthResponse;
+      persistSession(data.user, data.token);
       setNameInput("");
       setEmailInput("");
       setPasswordInput("");
@@ -368,20 +571,8 @@ export default function Page() {
   };
 
   const handleLogout = () => {
-    setUser(null);
-    setToken("");
-    setDashboard(null);
-    setRecipes(null);
-    setDashboardError("");
-    setRecipesError("");
-    setInfoMessage("");
-    setKeywordInput("");
-    setKeyword("");
-    setDiet("");
-    setPage(1);
-
-    localStorage.removeItem("diet_token");
-    localStorage.removeItem("diet_user");
+    setInfoMessage("You have been logged out.");
+    clearSession();
   };
 
   const handleSearchSubmit = (e: FormEvent) => {
@@ -565,36 +756,30 @@ export default function Page() {
           </form>
 
           <div className="mt-6 rounded-lg border border-gray-200 bg-gray-50 p-4">
-            <h2 className="font-semibold mb-2">OAuth Login</h2>
+            <h2 className="font-semibold mb-2">Google OAuth Login</h2>
             <p className="text-sm text-gray-600 mb-3">
-              Once your backend OAuth endpoint is ready, connect Google or GitHub here.
+              This project now supports one third-party login provider for Assignment 3.
             </p>
 
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="bg-blue-600 text-white py-2 px-4 rounded"
-                onClick={() =>
-                  setInfoMessage(
-                    "Google OAuth button is ready for wiring once your backend route is implemented."
-                  )
-                }
-              >
-                Login with Google
-              </button>
+            {!GOOGLE_CLIENT_ID ? (
+              <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">
+                Add <code>NEXT_PUBLIC_GOOGLE_CLIENT_ID</code> to your frontend environment to
+                enable Google sign-in.
+              </div>
+            ) : (
+              <>
+                <div id="google-signin-button" className="min-h-[44px]" />
+                {!googleButtonReady && !googleError && (
+                  <p className="mt-2 text-sm text-gray-500">Preparing Google sign-in...</p>
+                )}
+              </>
+            )}
 
-              <button
-                type="button"
-                className="bg-gray-800 text-white py-2 px-4 rounded"
-                onClick={() =>
-                  setInfoMessage(
-                    "GitHub OAuth button is ready for wiring once your backend route is implemented."
-                  )
-                }
-              >
-                Login with GitHub
-              </button>
-            </div>
+            {googleError && (
+              <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                {googleError}
+              </div>
+            )}
           </div>
 
           {infoMessage && (
@@ -614,14 +799,15 @@ export default function Page() {
           <div>
             <h1 className="text-3xl font-semibold">Nutritional Insights</h1>
             <p className="text-sm text-blue-100">
-              Assignment 3 dashboard wired to your cached Azure Functions APIs
+              Assignment 3 dashboard with cached Azure Functions and protected data APIs
             </p>
           </div>
 
           <div className="flex flex-col gap-2 md:items-end">
             <div className="flex flex-wrap gap-2 text-sm">
+              <span className="rounded bg-blue-500 px-3 py-1">Signed in as: {user.name}</span>
               <span className="rounded bg-blue-500 px-3 py-1">
-                Signed in as: {user.name}
+                Provider: {user.provider}
               </span>
               <span className="rounded bg-blue-500 px-3 py-1">
                 Source: {dashboard?.source || "loading"}
@@ -872,8 +1058,7 @@ export default function Page() {
               <>
                 <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                   <p className="text-sm text-gray-600">
-                    Showing page {recipes?.pagination.page || 1} of{" "}
-                    {recipes?.pagination.totalPages || 1}
+                    Showing page {recipes?.pagination.page || 1} of {recipes?.pagination.totalPages || 1}
                   </p>
                   <p className="text-sm text-gray-600">
                     Total matching recipes: {recipes?.pagination.totalItems || 0}
@@ -922,84 +1107,21 @@ export default function Page() {
         </section>
 
         <section className="mt-8">
-          <h2 className="text-2xl font-semibold mb-4">Security & Compliance</h2>
-          <div className="bg-white p-4 shadow-lg rounded-lg">
-            <h3 className="font-semibold">Security Status</h3>
+          <h2 className="text-2xl font-semibold mb-4">Security &amp; Compliance</h2>
+          <div className="bg-white p-4 shadow-lg rounded-lg space-y-2">
             <p className="text-sm text-gray-600">
-              Encryption: <span className="font-semibold text-green-600">Enabled</span>
+              Protected API access: <span className="font-semibold text-green-600">Enabled</span>
             </p>
             <p className="text-sm text-gray-600">
-              Access Control: <span className="font-semibold text-green-600">Secure</span>
+              Supported sign-in methods:{" "}
+              <span className="font-semibold text-green-600">Email/Password + Google OAuth</span>
             </p>
             <p className="text-sm text-gray-600">
-              Compliance: <span className="font-semibold text-green-600">Assignment 3 Ready</span>
+              Password storage: <span className="font-semibold text-green-600">bcrypt hash only</span>
             </p>
-          </div>
-        </section>
-
-        <section className="mt-8">
-          <h2 className="text-2xl font-semibold mb-4">OAuth &amp; 2FA Integration</h2>
-          <div className="bg-white p-4 shadow-lg rounded-lg">
-            <h3 className="font-semibold">Secure Login</h3>
-
-            <div className="flex flex-wrap gap-3 mb-4">
-              <button
-                className="bg-blue-600 text-white py-2 px-4 rounded"
-                onClick={() =>
-                  setInfoMessage(
-                    "Wire this button to your Google OAuth backend endpoint when it is ready."
-                  )
-                }
-              >
-                Login with Google
-              </button>
-
-              <button
-                className="bg-gray-800 text-white py-2 px-4 rounded"
-                onClick={() =>
-                  setInfoMessage(
-                    "Wire this button to your GitHub OAuth backend endpoint when it is ready."
-                  )
-                }
-              >
-                Login with GitHub
-              </button>
-            </div>
-
-            <div className="mt-4">
-              <label htmlFor="twofa" className="block text-sm text-gray-600 mb-1">
-                Enter 2FA Code
-              </label>
-              <input
-                id="twofa"
-                type="text"
-                className="p-2 border rounded w-full"
-                placeholder="Enter your 2FA code"
-                onFocus={() =>
-                  setInfoMessage("2FA UI is ready. Hook it up after your auth endpoints are done.")
-                }
-              />
-            </div>
-          </div>
-        </section>
-
-        <section className="mt-8">
-          <h2 className="text-2xl font-semibold mb-4">Cloud Resource Cleanup</h2>
-          <div className="bg-white p-4 shadow-lg rounded-lg">
             <p className="text-sm text-gray-600">
-              Ensure that cloud resources are efficiently managed and cleaned up
-              post-deployment.
+              User profile store: <span className="font-semibold text-green-600">Cosmos DB</span>
             </p>
-            <button
-              className="bg-red-600 text-white py-2 px-4 rounded mt-3"
-              onClick={() =>
-                setInfoMessage(
-                  "Keep this as a demo button unless you build a real cleanup workflow. Do not connect it to destructive actions for the presentation."
-                )
-              }
-            >
-              Clean Up Resources
-            </button>
           </div>
         </section>
 
@@ -1042,7 +1164,7 @@ export default function Page() {
       </main>
 
       <footer className="bg-blue-600 p-4 text-white text-center mt-10">
-        <p>&copy; 2025 Nutritional Insights. All Rights Reserved.</p>
+        <p>&copy; 2026 Nutritional Insights. All Rights Reserved.</p>
       </footer>
     </div>
   );
